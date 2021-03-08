@@ -18,16 +18,11 @@
 #include <sys/ioctl.h>
 #include <linux/types.h>
 #include <linux/spi/spidev.h>
-#include <gpiod.h>
 
-#ifndef CONSUMER
-#define CONSUMER   "Consumer"
-#endif
-
+#define line    0
 #define TRUE    (1==1)
 #define FALSE   (!TRUE)
 
-struct gpiod_line *line;
 struct spi_ioc_transfer xfer;
 
 static const unsigned char font7x14[] = {
@@ -129,6 +124,46 @@ static const unsigned char font7x14[] = {
   0XFE,0XFE,0XFE,0XFE,0XFE,0XFE,0X3F,0X3F,0X3F,0X3F,0X3F,0X3F   // del
 };
 
+void initspipin( int pin, char *mode )
+{
+    FILE *fp;
+    bool isdir;
+    char path[100] = "";
+    char direction[100] = "";
+    sprintf( path, "/sys/class/gpio/gpio%d", pin );
+    sprintf( direction, "/sys/class/gpio/gpio%d/direction", pin );
+    struct stat st = {0};
+    if ( !stat(path, &st) ) {
+        isdir = S_ISDIR( st.st_mode );
+    }
+    if ( !isdir ) {
+        fp = fopen( "/sys/class/gpio/export", "w" );
+        fprintf( fp, "%d", pin );
+        fclose( fp );
+        fp = fopen( direction, "w" );
+        fprintf( fp, "%s", mode );
+        fclose( fp );
+    }
+}
+
+void setspipin( int pin, int value )
+{
+    FILE *fp;
+    char pinvalue[100] = "";
+    sprintf( pinvalue, "/sys/class/gpio/gpio%d/value", pin );
+    fp = fopen( pinvalue, "w" );
+    fprintf( fp, "%d", value );
+    fclose( fp );
+}
+
+void closespipin( int pin )
+{
+    FILE *fp;
+    fp = fopen( "/sys/class/gpio/unexport", "w" );
+    fprintf( fp, "%d", pin );
+    fclose( fp );
+}
+
 void spi_write( int spi, unsigned char *dout, int len )
 {  
     uint8_t buf[len];
@@ -149,7 +184,7 @@ void ssd1306_init( int spi )
 {
     unsigned char myData[] = {0xa8, 0x3f, 0xd3, 0x0, 0x40, 0xa0, 0xc0, 0xda, 0x2, 0x81, 0x7f, 0xa4, 0xa6, 0xd5, 0x80, 0x8d, 0x14, 0xaf};
 
-    gpiod_line_set_value( line, 0 );
+    setspipin( line, 0 );
     spi_write( spi, myData, 18 );
 }
 
@@ -157,7 +192,7 @@ void set_col_addr( int spi, int col_start, int col_end )
 {
     unsigned char myData[3];
 
-    gpiod_line_set_value( line, 0 );
+    setspipin( line, 0 );
 
     myData[0] = 0x21;
     myData[1] = col_start & 0x7f;
@@ -169,7 +204,7 @@ void set_page_addr( int spi, int page_start, int page_end )
 {
     unsigned char myData[3];
 
-    gpiod_line_set_value( line, 0 );
+    setspipin( line, 0 );
 
     myData[0] = 0x22;
     myData[1] = page_start & 0x3;
@@ -181,7 +216,7 @@ void set_horizontal_mode( int spi )
 {
     unsigned char myData[2];
 
-    gpiod_line_set_value( line, 0 );
+    setspipin( line, 0 );
 
     myData[0] = 0x20;
     myData[1] = 0x00;
@@ -192,7 +227,7 @@ void set_start_page( int spi, int page )
 {
     unsigned char myData[1];
 
-    gpiod_line_set_value( line, 0 );
+    setspipin( line, 0 );
 
     myData[0] = 0xB0 | (page & 0x3);
     spi_write( spi, myData, 1 );
@@ -202,7 +237,7 @@ void set_start_col( int spi, int col )
 {
     unsigned char myData[2];
 
-    gpiod_line_set_value( line, 0 );
+    setspipin( line, 0 );
 
     myData[0] = 0xf & col;
     myData[1] = (0xf & (col >> 4)) | 0x10;
@@ -217,7 +252,7 @@ void clearDisplay( int spi )
 
     set_col_addr( spi, 0, 127 );
     set_page_addr( spi, 0, 3 );
-    gpiod_line_set_value( line, 1 );
+    setspipin( line, 1 );
     for (j=0; j<4; j++) {
         for (k=0; k<8; k++) {
             unsigned char myData[16];
@@ -258,7 +293,7 @@ void oledprintf( int spi, unsigned char *ch )
           } else {
               set_page_addr( spi, 2, 3 );
           }
-          gpiod_line_set_value( line, 1 );
+          setspipin( line, 1 );
           spi_write( spi, mychar, 12 );
           start_col += 7;
       } else {
@@ -295,7 +330,7 @@ void oledascii( int spi )
             } else {
                 set_page_addr( spi, 2, 3 );
             }
-            gpiod_line_set_value( line, 1 );
+            setspipin( line, 1 );
             spi_write( spi, mychar, 12 );
             start_col += 7;
             if ( start_col >= 112 ) {
@@ -309,10 +344,6 @@ void oledascii( int spi )
 
 int ssd1306_test( void )
 {
-    char *chipname = "gpiochip0";
-    unsigned int line_num = 0;  // GPIO Pin #32
-    struct gpiod_chip *chip;
-    int ret;
     int spi;
     int i;
     int j;
@@ -320,50 +351,22 @@ int ssd1306_test( void )
     uint32_t speed = 5000000;
     uint8_t bits = 8;
 
-    chip = gpiod_chip_open_by_name(chipname);
-    if ( !chip ) {
-        perror("Open chip failed\n");
-        return 0;
-    }
-
-    line = gpiod_chip_get_line(chip, line_num);
-    if ( !line ) {
-        perror("Get line failed\n");
-        gpiod_chip_close( chip );
-        return 0;
-    }
-
-    ret = gpiod_line_request_output(line, CONSUMER, 0);
-    if ( ret < 0 ) {
-        perror("Request line as output failed\n");
-        gpiod_line_release( line );
-        gpiod_chip_close( chip );
-	return 0;
-    }
-
-    gpiod_line_set_value( line, 1 );
+    initspipin( line, "out" );
+    setspipin( line, 1 );
     if ((spi = open( "/dev/spidev0.0", O_RDWR )) < 0) {
         printf("Failed to open the bus.");
-	gpiod_line_release( line );
-	gpiod_chip_close( chip );
         exit( 1 );
     }
     if (ioctl( spi, SPI_IOC_WR_MODE, &mode )<0) {
 	printf("can't set spi mode");
-	gpiod_line_release( line );
-	gpiod_chip_close( chip );
 	return 1;
     }
     if (ioctl( spi, SPI_IOC_WR_BITS_PER_WORD, &bits )<0) { 
         printf("can't set bits per word");
-	gpiod_line_release( line );
-	gpiod_chip_close( chip );
 	return 1;
     }
     if (ioctl( spi, SPI_IOC_WR_MAX_SPEED_HZ, &speed )<0) { 
         printf("can't set max speed hz");
-	gpiod_line_release( line );
-	gpiod_chip_close( chip );
         return 1;
     }
 
@@ -378,7 +381,7 @@ int ssd1306_test( void )
     set_col_addr( spi, 0, 127 );
     set_page_addr( spi, 0, 3 );
   
-    gpiod_line_set_value( line, 1 );
+    setspipin( line, 1 );
     for (j=0; j < 4; j++) {
         for (i=0; i < 128; i=i+8) {
 	    unsigned char myData[] = {0x81, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x81};
@@ -393,8 +396,7 @@ int ssd1306_test( void )
     clearDisplay( spi );
     oledprintf( spi, "This is a test !\nIt works !\n" );
 
-    gpiod_line_release( line );
-    gpiod_chip_close( chip );
+    closespipin( line );
     close( spi );
     return 0;
 }
